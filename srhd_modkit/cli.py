@@ -1392,7 +1392,8 @@ def cmd_script_info(args: argparse.Namespace) -> int:
 
 def cmd_script_validate(args: argparse.Namespace) -> int:
     project = load_rson(args.source)
-    issues = project.validate()
+    profile = Toolchain(getattr(args, "tools_root", None))._rscript_cli_profile()
+    issues = project.validate(rscript_profile=profile)
     if not any(issue.severity == "error" for issue in issues):
         issues.extend(lint_custom_faction_resources((project,)))
     issues.extend(lint_rson_display_text(project.data, args.source))
@@ -1591,7 +1592,11 @@ def _runtime_lint_target(
     for path in rson_files:
         try:
             project = load_rson(path)
-            structural = [item for item in project.validate() if item.severity == "error"]
+            structural = [
+                item
+                for item in project.validate(rscript_profile=chain._rscript_cli_profile())
+                if item.severity == "error"
+            ]
             if structural:
                 issues.append(
                     RuntimeIssue(
@@ -2665,7 +2670,7 @@ def cmd_script_audit_mod(args: argparse.Namespace) -> int:
     for path in rson_files:
         try:
             project = load_rson(path)
-            project_issues = project.validate()
+            project_issues = project.validate(rscript_profile=chain._rscript_cli_profile())
             if project_issues:
                 issues.append({"severity": "error", "code": "rson-invalid", "message": f"{path.relative_to(root)}: {project_issues[0].message}"})
             else:
@@ -3323,6 +3328,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     script_validate = script_sub.add_parser("validate", help="Проверить объекты, ссылки и код RSON")
     script_validate.add_argument("source")
+    script_validate.add_argument("--tools-root", help="Каталог SRHD ModKit с RScript 4.10f/4.15f")
     script_validate.add_argument("--json", action="store_true")
     script_validate.set_defaults(func=cmd_script_validate)
 

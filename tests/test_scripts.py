@@ -125,6 +125,30 @@ class RsonTests(unittest.TestCase):
         )
         self.assertEqual(issue.severity, "error")
         self.assertIn("#7 Fifth", issue.message)
+        self.assertNotIn(
+            "rscript-tgroup-hard-limit",
+            {
+                issue.code
+                for issue in RsonProject(data, Path("five-groups-modern.rson")).validate(
+                    rscript_profile="modern-cli"
+                )
+            },
+        )
+
+    def test_unknown_rscript_profile_downgrades_tgroup_limit_to_warning(self) -> None:
+        data = deepcopy(SAMPLE)
+        data["Visual.Objects"][0]["Groups"] = [
+            {"Type": "TGroup", "Name": f"Group{index}", "Parent": -1, "#": index + 2}
+            for index in range(1, 6)
+        ]
+        issue = next(
+            issue
+            for issue in RsonProject(data, Path("unknown-groups.rson")).validate(
+                rscript_profile="undetected-cli"
+            )
+            if issue.code == "rscript-tgroup-hard-limit"
+        )
+        self.assertEqual(issue.severity, "warning")
 
     def test_tgroup_requires_outgoing_planet_and_initial_state_links(self) -> None:
         data = deepcopy(SAMPLE)

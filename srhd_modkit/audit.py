@@ -1508,7 +1508,9 @@ def _script_check(context: AuditContext) -> AuditCheck:
     for path in rsons:
         try:
             project = load_rson(path)
-            structural = project.validate()
+            structural = project.validate(
+                rscript_profile=context.tools._rscript_cli_profile()
+            )
             issues.extend(
                 AuditIssue.from_value(item, validator=name, mod=context.mod_name, path=path)
                 for item in structural

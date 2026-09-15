@@ -302,7 +302,7 @@ class RsonProject:
             "removed_links": len(link_indexes) if detach_references else 0,
         }
 
-    def validate(self) -> list[ScriptIssue]:
+    def validate(self, *, rscript_profile: str = "legacy-cli") -> list[ScriptIssue]:
         issues: list[ScriptIssue] = []
         if self.data.get("FileID") != RSON_FILE_ID:
             issues.append(ScriptIssue("error", "rson-file-id", f"Ожидался FileID {RSON_FILE_ID}"))
@@ -379,17 +379,24 @@ class RsonProject:
             for item in objects
             if str(item.get("Type", "")).casefold() == "tgroup"
         ]
-        if len(tgroups) > RSCRIPT_410F_MAX_TGROUPS:
+        if len(tgroups) > RSCRIPT_410F_MAX_TGROUPS and rscript_profile != "modern-cli":
             labels = ", ".join(
                 f"#{item.get('#')} {str(item.get('Name', '')).strip() or '<без имени>'}"
                 for item in tgroups
             )
+            severity = "warning" if rscript_profile in {"unknown-cli", "undetected-cli"} else "error"
+            version_note = (
+                " Версия RScript не определена: подтвердите сборку 4.15f или ниже; "
+                "для 4.10f это блокирующий лимит."
+                if severity == "warning"
+                else ""
+            )
             issues.append(
                 ScriptIssue(
-                    "error",
+                    severity,
                     "rscript-tgroup-hard-limit",
                     f"RScript 4.10f поддерживает не более {RSCRIPT_410F_MAX_TGROUPS} объектов TGroup; "
-                    f"найдено {len(tgroups)}: {labels}",
+                    f"найдено {len(tgroups)}: {labels}.{version_note}",
                     "Visual.Objects",
                 )
             )

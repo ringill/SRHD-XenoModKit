@@ -1416,7 +1416,8 @@ class Toolchain:
         if scr_output.suffix.casefold() != ".scr":
             raise ValueError("Результат компиляции RSON должен иметь расширение .scr")
         project = load_rson(source)
-        issues = project.validate()
+        rscript_profile = self._rscript_cli_profile()
+        issues = project.validate(rscript_profile=rscript_profile)
         errors = [issue for issue in issues if issue.severity == "error"]
         if errors:
             raise ValueError("RSON не прошёл проверку: " + "; ".join(issue.message for issue in errors[:5]))
@@ -2030,7 +2031,9 @@ class Toolchain:
             try:
                 project = load_rson(recovered)
                 summary = project.summary()
-                validation_issues = project.validate()
+                validation_issues = project.validate(
+                    rscript_profile=self._rscript_cli_profile()
+                )
             except Exception as exc:
                 phases.append(
                     {
@@ -2145,7 +2148,13 @@ class Toolchain:
                         timeout=decompile_timeout,
                     )
                     deep_project = load_rson(deep_rson)
-                    deep_errors = [issue for issue in deep_project.validate() if issue.severity == "error"]
+                    deep_errors = [
+                        issue
+                        for issue in deep_project.validate(
+                            rscript_profile=self._rscript_cli_profile()
+                        )
+                        if issue.severity == "error"
+                    ]
                     if deep_errors:
                         raise RuntimeError(
                             "Повторно восстановленный RSON не прошёл проверку: "
@@ -2498,7 +2507,13 @@ class Toolchain:
         destination = Path(destination).resolve()
         if source.suffix.casefold() != ".rson" or not source.is_file():
             raise ValueError("Экспорт в RSM принимает существующий файл .rson")
-        errors = [issue for issue in load_rson(source).validate() if issue.severity == "error"]
+        errors = [
+            issue
+            for issue in load_rson(source).validate(
+                rscript_profile=self._rscript_cli_profile()
+            )
+            if issue.severity == "error"
+        ]
         if errors:
             raise ValueError(f"RSON не прошёл проверку: {errors[0].message}")
         if not split and destination.suffix.casefold() != ".rsm":
@@ -3028,7 +3043,13 @@ class Toolchain:
         if destination.exists() and not overwrite:
             raise FileExistsError(f"Результат уже существует: {destination}")
         if source.suffix.casefold() == ".rson":
-            errors = [item for item in load_rson(source).validate() if item.severity == "error"]
+            errors = [
+                item
+                for item in load_rson(source).validate(
+                    rscript_profile=self._rscript_cli_profile()
+                )
+                if item.severity == "error"
+            ]
             if errors:
                 raise ValueError(f"RSON не прошёл проверку: {errors[0].message}")
         tool, cli_profile = self._require_supported_rscript("convert")
@@ -3070,7 +3091,9 @@ class Toolchain:
             if not generated.is_file():
                 raise RuntimeError("RScript CLI не создал результат конвертации")
             if generated.suffix.casefold() == ".rson":
-                issues = load_rson(generated).validate()
+                issues = load_rson(generated).validate(
+                    rscript_profile=self._rscript_cli_profile()
+                )
                 if any(item.severity == "error" for item in issues):
                     raise RuntimeError(f"Полученный RSON не прошёл проверку: {issues[0].message}")
             with tempfile.TemporaryDirectory(prefix=".srhd-script-output-", dir=destination.parent) as output_name:
