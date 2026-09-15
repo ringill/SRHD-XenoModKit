@@ -147,9 +147,11 @@ from .native_loader import (
     NativeLoaderIssue,
     NativeLoaderReport,
     NativePluginInfo,
+    NativeScriptFunctionInfo,
     PeDllInfo,
     initialize_native_mod,
     inspect_native_dll,
+    discover_native_script_functions,
     validate_native_mod,
 )
 from .quest_formula import FormulaNode, QuestFormulaError, parse_quest_formula, validate_quest_formula
@@ -321,9 +323,11 @@ __all__ = [
     "NativeLoaderIssue",
     "NativeLoaderReport",
     "NativePluginInfo",
+    "NativeScriptFunctionInfo",
     "PeDllInfo",
     "initialize_native_mod",
     "inspect_native_dll",
+    "discover_native_script_functions",
     "validate_native_mod",
     "FormulaNode",
     "QuestFormulaError",

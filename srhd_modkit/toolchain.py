@@ -1420,9 +1420,15 @@ class Toolchain:
         errors = [issue for issue in issues if issue.severity == "error"]
         if errors:
             raise ValueError("RSON не прошёл проверку: " + "; ".join(issue.message for issue in errors[:5]))
+        native_root = source.parent
+        for candidate in (source.parent, *source.parent.parents[:6]):
+            if (candidate / "Native").is_dir():
+                native_root = candidate
+                break
         runtime_issues = lint_rson_runtime(
             project,
             check_custom_factions=check_custom_factions,
+            native_root=native_root,
         )
         allow = tuple(allow)
         runtime_rows = runtime_issue_rows(runtime_issues, Path(allow_root) if allow_root else source.parent, allow)

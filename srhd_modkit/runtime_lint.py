@@ -9,7 +9,11 @@ from .blockpar import BlockParDocument, BlockParNode
 from .files import iter_files
 from .module_info import find_module_info, parse_module_info
 from .models import ModuleInfo
-from .native_loader import inspect_native_dll
+from .native_loader import (
+    NativeScriptFunctionInfo,
+    discover_native_script_functions,
+    inspect_native_dll,
+)
 from .resources import verify_resource
 from .rscript_api import RSCRIPT_RUNTIME_CALLS
 from .scripts import RsonProject
@@ -1395,17 +1399,19 @@ def _callable_tvars(project: RsonProject) -> set[str]:
 def _lint_unresolved_user_functions(
     project: RsonProject,
     functions: dict[str, FunctionBlock],
+    native_functions: Mapping[str, NativeScriptFunctionInfo] | None = None,
 ) -> list[RuntimeIssue]:
     """Reject calls absent from the local scope, imports and SRHD API registry."""
 
     known_project = set(functions)
+    native_functions = native_functions or {}
     shared_init = {name for name, block in functions.items() if block.code_type == "init"}
     callables = _callable_tvars(project)
     path = str(project.path) if project.path else None
     issues: list[RuntimeIssue] = []
     for container in _iter_code_containers(project):
         local = _local_function_names(list(container.lines))
-        available = set(RSCRIPT_RUNTIME_CALLS) | callables | local
+        available = set(RSCRIPT_RUNTIME_CALLS) | callables | local | set(native_functions)
         if container.field == "Code" and container.code_type == "turn":
             available.update(shared_init)
         reported: set[str] = set()
@@ -1427,6 +1433,26 @@ def _lint_unresolved_user_functions(
                     )
                 )
                 reported.add(call)
+        container_text = "\n".join(container.lines)
+        masked_container = _mask_non_code(container_text)
+        called_native = {call.casefold() for call in _calls(container_text)}
+        for native_name, native_info in native_functions.items():
+            if native_name not in called_native or not native_info.arities:
+                continue
+            for position, arguments in _call_arguments(masked_container, native_info.name):
+                arity = 0 if len(arguments) == 1 and not arguments[0] else len(arguments)
+                if arity not in native_info.arities:
+                    line_number = masked_container.count("\n", 0, position) + 1
+                    issues.append(
+                        RuntimeIssue(
+                            "error",
+                            "runtime-native-loader-function-arity-mismatch",
+                            f"Нативная функция {native_info.name} из XenoNativeLoader ожидает аргументы {native_info.arities}, получено {arity}; проверяйте Native Script API manifest",
+                            path,
+                            f"{container.location}:{line_number}",
+                            native_info.source,
+                        )
+                    )
     return issues
 
 
@@ -10034,15 +10060,51 @@ def lint_rson_runtime(
     *,
     main_documents: Sequence[BlockParDocument] | None = None,
     check_custom_factions: bool = True,
+    native_root: str | Path | None = None,
 ) -> list[RuntimeIssue]:
     path = str(project.path) if project.path else None
     functions, issues = _extract_functions(project)
+    native_functions: dict[str, NativeScriptFunctionInfo] = {}
+    if native_root is not None:
+        wanted = {
+            call
+            for container in _iter_code_containers(project)
+            for call in _calls("\n".join(container.lines))
+            if call.casefold() not in RSCRIPT_RUNTIME_CALLS
+        }
+        native_functions, native_discovery_issues = discover_native_script_functions(
+            native_root,
+            wanted=wanted,
+        )
+        issues.extend(
+            RuntimeIssue(
+                item.severity,
+                item.code,
+                item.message,
+                item.path,
+                evidence="native-loader-script-api",
+            )
+            for item in native_discovery_issues
+        )
+        called = {call.casefold() for call in wanted}
+        for folded, info in native_functions.items():
+            if folded not in called or info.verified:
+                continue
+            issues.append(
+                RuntimeIssue(
+                    "warning",
+                    "runtime-native-loader-function-unverified",
+                    f"Вызов {info.name} найден в DLL {info.dll.name if info.dll else info.source}, но его регистрация в RScript подтверждается только встроенным именем. Это не штатный API: выпуск зависит от включённого XenoNativeLoader и успешной инициализации плагина",
+                    path,
+                    evidence=info.source,
+                )
+            )
     nonnull_predicates = _nonnull_predicate_summaries(functions)
     issues.extend(_lint_apostrophes_in_line_comments(project))
     issues.extend(_lint_unregistered_tvar_assignments(project, functions))
     issues.extend(_lint_cross_block_calls(project, functions))
     issues.extend(_lint_unavailable_engine_calls(project, functions))
-    issues.extend(_lint_unresolved_user_functions(project, functions))
+    issues.extend(_lint_unresolved_user_functions(project, functions, native_functions))
     issues.extend(
         _lint_object_api_behind_boolean_guard(project, functions, nonnull_predicates)
     )

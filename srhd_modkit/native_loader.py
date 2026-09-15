@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import configparser
+import json
 import locale
 import os
 import re
@@ -21,6 +22,7 @@ NATIVE_LOADER_SOURCE_URL = "https://github.com/Xenomorphchyma/XenoMods"
 # Public compatibility alias retained for callers that used the original API.
 NATIVE_LOADER_VERSION = NATIVE_LOADER_MINIMUM_VERSION
 NATIVE_HOST_API = 1
+NATIVE_SCRIPT_API_SCHEMA = "srhd-modkit-native-script-api-v1"
 _QUERY_EXPORT = "XenoPlugin_Query"
 _INITIALIZE_EXPORT = "XenoPlugin_Initialize"
 _TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
@@ -90,6 +92,34 @@ class NativePluginInfo:
 
 
 @dataclass(frozen=True, slots=True)
+class NativeScriptFunctionInfo:
+    """A script function supplied by a Native Loader plugin.
+
+    ``verified`` is true only for a sidecar manifest.  A legacy plugin can
+    register a function from a private runtime hook without exporting a PE
+    symbol; in that case ModKit records a conservative embedded-name
+    candidate instead of pretending that the registration was proven.
+    """
+
+    name: str
+    arities: tuple[int, ...]
+    source: str
+    dll: Path | None = None
+    verified: bool = False
+    enabled: bool = True
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "arities": list(self.arities),
+            "source": self.source,
+            "dll": str(self.dll) if self.dll is not None else None,
+            "verified": self.verified,
+            "enabled": self.enabled,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class NativeLoaderReport:
     root: Path
     plugins: tuple[NativePluginInfo, ...]
@@ -117,6 +147,26 @@ class NativeLoaderReport:
             "detected": self.detected,
             "valid": self.valid,
             "complete": self.complete,
+            "layout": {
+                "recommended": "single-plugin-config",
+                "mod_root": ["ModuleInfo.txt", "Native/", "SOURCE/"],
+                "runtime": [
+                    "Native/<Plugin>.XenoPlugin.dll",
+                    "Native/<Plugin>.XenoPlugin.ini",
+                ],
+                "source": ["SOURCE/Native/<Plugin>/", "SOURCE/Native/build.ps1"],
+                "rules": [
+                    "Выберите automatic INI рядом с <Plugin>.XenoPlugin.dll ИЛИ один корневой XenoNativePlugin.ini; не создавайте оба варианта для одной DLL",
+                    "В automatic INI Dll=<Plugin>.XenoPlugin.dll; в корневом manifest Dll=Native\\<Plugin>.dll",
+                    "XenoCore.dll, dsound.dll и XenoNative.ini устанавливаются рядом с Rangers.exe и не входят в мод",
+                    "Native Script API sidecar (*.XenoScriptApi.json) хранится в SOURCE/Native и не публикуется в игровом архиве",
+                ],
+                "detected_config_files": sorted(
+                    str(plugin.manifest)
+                    for plugin in self.plugins
+                    if plugin.manifest is not None
+                ),
+            },
             "plugins": [plugin.as_dict() for plugin in self.plugins],
             "issues": [issue.as_dict() for issue in self.issues],
             "summary": {
@@ -219,6 +269,187 @@ def inspect_native_dll(path: str | Path) -> PeDllInfo:
         tuple(sorted(set(exports), key=str.casefold)),
         sha256_file(source),
     )
+
+
+_SCRIPT_API_MANIFEST_SUFFIXES = (
+    ".xenoscriptapi.json",
+    ".xeno-script-api.json",
+    ".script-api.json",
+)
+_SCRIPT_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _native_script_api_manifests(root: Path) -> list[Path]:
+    return sorted(
+        (
+            path
+            for path in iter_files(root)
+            if path.name.casefold().endswith(_SCRIPT_API_MANIFEST_SUFFIXES)
+            and any(part.casefold() in {"source", "sources", "native"} for part in path.relative_to(root).parts[:-1])
+            and not any(part.casefold().startswith(".srhd-") for part in path.relative_to(root).parts)
+        ),
+        key=lambda path: str(path).casefold(),
+    )
+
+
+def _native_script_api_dlls(root: Path) -> list[tuple[Path, bool]]:
+    """Return plugin DLLs and their static Enabled state without loading them."""
+
+    native = _native_tree(root)
+    if native is None:
+        return []
+    candidates: dict[str, tuple[Path, bool]] = {}
+    for path in iter_files(native):
+        folded = path.name.casefold()
+        if folded.endswith(".xenoplugin.dll"):
+            candidates[str(path.resolve()).casefold()] = (path, True)
+    configs = [
+        path
+        for path in iter_files(root)
+        if path.name.casefold() in {"xenonativeplugin.ini", "xenonativeplugin.cfg"}
+        or path.name.casefold().endswith(".xenomanifest.ini")
+    ]
+    for config in configs:
+        try:
+            parser = _read_ini(config)
+            section = _section_name(parser, "Plugin")
+            if section is None:
+                continue
+            value = parser.get(section, "Dll", fallback="").strip()
+            if not value:
+                continue
+            enabled, _valid = _bool_value(parser, "Plugin", "Enabled", True)
+            dll = _manifest_relative_path(config, value, root)
+            if dll.is_file() and dll.suffix.casefold() == ".dll":
+                candidates[str(dll.resolve()).casefold()] = (dll, enabled)
+        except Exception:
+            # The normal validator reports malformed manifests.  Discovery is
+            # deliberately best-effort and must never hide that validator's
+            # diagnostics or execute an untrusted config.
+            continue
+    return sorted(candidates.values(), key=lambda item: str(item[0]).casefold())
+
+
+def _embedded_script_names(path: Path, wanted: set[str]) -> set[str]:
+    """Find exact RScript-like names embedded in a legacy DLL.
+
+    Native Loader legacy plugins commonly keep their registration table as
+    UTF-16 strings and expose no PE exports.  Matching only names already
+    called by the RSON avoids treating arbitrary strings in a DLL as APIs.
+    """
+
+    if not wanted:
+        return set()
+    data = path.read_bytes()
+    found: set[str] = set()
+    for name in wanted:
+        encoded_ascii = name.encode("ascii", errors="ignore") + b"\0"
+        encoded_utf16 = name.encode("utf-16le") + b"\0\0"
+        if encoded_ascii in data or encoded_utf16 in data:
+            found.add(name)
+    return found
+
+
+def _manifest_dll_for_api(manifest: Path, raw: dict[str, Any], root: Path) -> Path | None:
+    value = raw.get("dll")
+    if value is None:
+        stem = manifest.name
+        for suffix in _SCRIPT_API_MANIFEST_SUFFIXES:
+            if stem.casefold().endswith(suffix):
+                stem = stem[: -len(suffix)]
+                break
+        for candidate in (manifest.with_name(stem + ".dll"), manifest.parent / "Native" / (stem + ".dll")):
+            if candidate.is_file():
+                return candidate.resolve()
+        return None
+    if not isinstance(value, str):
+        raise ValueError("поле dll в Native Script API manifest должно быть строкой")
+    return _manifest_relative_path(manifest, value, root)
+
+
+def discover_native_script_functions(
+    root: str | Path,
+    *,
+    wanted: Iterable[str] = (),
+) -> tuple[dict[str, NativeScriptFunctionInfo], tuple[NativeLoaderIssue, ...]]:
+    """Discover functions registered by XenoNativeLoader without DLL execution.
+
+    Explicit ``*.XenoScriptApi.json`` sidecars provide names and arities.  For
+    legacy DLLs without a sidecar, an exact ASCII/UTF-16 name match is only a
+    candidate and is reported as unverified; it is never silently treated as
+    a built-in API.  This is the safe middle ground for hooks such as
+    ``StarMapGetObjectCluster`` which are not PE exports.
+    """
+
+    resolved_root = Path(root).resolve()
+    wanted_names = {str(value) for value in wanted if _SCRIPT_IDENTIFIER_RE.fullmatch(str(value))}
+    functions: dict[str, NativeScriptFunctionInfo] = {}
+    issues: list[NativeLoaderIssue] = []
+    for manifest in _native_script_api_manifests(resolved_root):
+        try:
+            raw = json.loads(manifest.read_text(encoding="utf-8"))
+            if not isinstance(raw, dict) or raw.get("schema") != NATIVE_SCRIPT_API_SCHEMA:
+                raise ValueError(f"ожидалась schema={NATIVE_SCRIPT_API_SCHEMA}")
+            dll = _manifest_dll_for_api(manifest, raw, resolved_root)
+            if dll is None or not dll.is_file():
+                raise ValueError("manifest ссылается на отсутствующую DLL; укажите относительный путь dll")
+            functions_raw = raw.get("functions")
+            if not isinstance(functions_raw, list):
+                raise ValueError("поле functions должно быть массивом")
+            enabled = True
+            for function in functions_raw:
+                if not isinstance(function, dict):
+                    raise ValueError("элемент functions должен быть объектом")
+                name = function.get("name")
+                if not isinstance(name, str) or _SCRIPT_IDENTIFIER_RE.fullmatch(name) is None:
+                    raise ValueError(f"недопустимое имя функции {name!r}")
+                raw_arity = function.get("arity", function.get("arities", []))
+                if isinstance(raw_arity, int):
+                    arities = (raw_arity,)
+                elif isinstance(raw_arity, list) and all(isinstance(item, int) and item >= 0 for item in raw_arity):
+                    arities = tuple(sorted(set(raw_arity)))
+                elif raw_arity in (None, []):
+                    arities = ()
+                else:
+                    raise ValueError(f"недопустимая arity для {name}")
+                if any(item < 0 for item in arities):
+                    raise ValueError(f"отрицательная arity для {name}")
+                functions[name.casefold()] = NativeScriptFunctionInfo(
+                    name, arities, "manifest", dll, True, enabled
+                )
+        except Exception as exc:
+            issues.append(
+                NativeLoaderIssue(
+                    "error",
+                    "native-loader-script-api-manifest-invalid",
+                    f"Не удалось прочитать Native Script API manifest: {exc}",
+                    str(manifest),
+                    "Используйте schema srhd-modkit-native-script-api-v1 и не запускайте DLL для генерации отчёта.",
+                )
+            )
+
+    for dll, enabled in _native_script_api_dlls(resolved_root):
+        embedded = _embedded_script_names(dll, wanted_names)
+        if not enabled:
+            for name in sorted(embedded, key=str.casefold):
+                issues.append(
+                    NativeLoaderIssue(
+                        "error",
+                        "native-loader-script-api-plugin-disabled",
+                        f"RSON вызывает {name}, но DLL {dll.name} указана как Enabled=0; игра завершит выполнение с Not link var, пока плагин не будет включён",
+                        str(dll),
+                        "Включите plugin только если он совместим с текущей сборкой игры; иначе удалите вызов или добавьте корректную зависимость.",
+                    )
+                )
+            continue
+        for name in embedded:
+            folded = name.casefold()
+            if folded in functions:
+                continue
+            functions[folded] = NativeScriptFunctionInfo(
+                name, (), "embedded-name", dll, False, enabled
+            )
+    return functions, tuple(issues)
 
 
 def _decode_ini(path: Path) -> str:

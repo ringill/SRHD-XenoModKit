@@ -1516,7 +1516,11 @@ def _script_check(context: AuditContext) -> AuditCheck:
             if not any(item.severity == "error" for item in structural):
                 valid_rsons += 1
                 rson_projects.append(project)
-                values = lint_rson_runtime(project, check_custom_factions=False)
+                values = lint_rson_runtime(
+                    project,
+                    check_custom_factions=False,
+                    native_root=context.root,
+                )
                 runtime_values.extend(values)
                 issues.extend(
                     AuditIssue.from_value(item, validator=name, mod=context.mod_name, path=path)

@@ -33,6 +33,23 @@ MyMod/
     MyNativeRuntime.XenoPlugin.ini
 ```
 
+Используйте один из двух вариантов регистрации для каждой DLL, не оба сразу:
+
+```text
+Вариант automatic (рекомендуется):
+  Native/MyRuntime.XenoPlugin.dll
+  Native/MyRuntime.XenoPlugin.ini       [Plugin] Enabled=1, Dll=MyRuntime.XenoPlugin.dll
+
+Вариант manifest:
+  XenoNativePlugin.ini                  [Plugin] Enabled=1, Dll=Native\MyRuntime.dll
+  Native/MyRuntime.dll
+```
+
+`XenoNativePlugin.ini` внутри `Native/` с тем же DLL не нужен, если уже есть
+automatic INI; дубликаты дают повторное обнаружение или неверный относительный
+путь `Native\Native\...`. Команда `native validate` всегда печатает эту схему,
+а JSON-отчёт содержит её в поле `layout`.
+
 Поддерживаются корневой `XenoNativePlugin.ini` и несколько
 `Native/**/*.XenoManifest.ini`:
 
@@ -77,6 +94,37 @@ PE-экспорт сами по себе недостаточны. В `CFG/Main.
 `<ScriptName>=<Library>`. `script lint-runtime`, `script audit-mod`, project
 build и release-аудит проверяют эту цепочку, включая число аргументов и точный
 PE export, не загружая DLL.
+
+### Функции, зарегистрированные самим legacy-плагином
+
+Старые плагины могут добавлять функции непосредственно в таблицу RScript через
+хуки Loader. Такие имена не обязаны быть PE-экспортами. ModKit поэтому ищет
+точное совпадение вызываемого имени в ASCII/UTF-16 таблицах подключённой DLL.
+Совпадение снимает ложную ошибку `runtime-unresolved-user-function`, но честно
+выдаётся как `runtime-native-loader-function-unverified`: наличие строки ещё не
+доказывает, что текущая версия Loader успешно установила хук. Если INI отключает
+DLL, вызов остаётся блокирующей ошибкой.
+
+Для современных и проверенных плагинов можно положить рядом с исходным DLL
+машиночитаемый sidecar `*.XenoScriptApi.json`:
+
+```json
+{
+  "schema": "srhd-modkit-native-script-api-v1",
+  "dll": "Galaxy.XenoPlugin.dll",
+  "functions": [
+    {"name": "StarMapGetObjectCluster", "arity": 1}
+  ]
+}
+```
+
+Sidecar не исполняет DLL и не добавляется в игровой архив автоматически, если
+лежит в `SOURCE/Native`. Для каждой функции можно указать несколько допустимых
+арностей через массив `arity`; отсутствие арности оставляет только проверку
+имени. Неверный манифест, отсутствующая DLL или несовпадение числа аргументов
+блокируют аудит. Это позволяет описать такие вызовы, как
+`StarMapGetObjectCluster(star)`, не маскируя настоящий `Not link var` при
+отключённом или не загрузившемся Native Loader.
 
 `srhd compat` использует для native-модов тот же эффективный порядок, что игра
 и Loader: стабильную сортировку активных `CurrentMod` по возрастанию `Priority`

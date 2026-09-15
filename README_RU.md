@@ -148,6 +148,13 @@ x86 PE32 и точные ABI exports `XenoPlugin_Query` / `XenoPlugin_Initialize
 
 При использовании `ImportedFunction` аудит также проверяет регистрацию
 `Data/ScriptLibs`, привязку `ScriptName`, сигнатуру callable и PE-экспорт.
+Для legacy-плагинов XenoNativeLoader, которые регистрируют функции прямо через
+runtime-хук и не имеют PE-экспорта, ModKit распознаёт точные имена из DLL и
+помечает их как `runtime-native-loader-function-unverified`. Точный sidecar
+`*.XenoScriptApi.json` в `SOURCE/Native` добавляет проверку арности; отключённый
+плагин или отсутствующая DLL остаются ошибкой.
+Команда `native validate` также выводит рекомендуемую структуру каталогов и
+помечает дублирующие INI; в JSON она доступна в поле `layout`.
 
 ## Универсальный аудит и релиз
 

@@ -966,6 +966,9 @@ def cmd_native_validate(args: argparse.Namespace) -> int:
             f"Native plugins: {result['summary']['plugins']}; "
             f"ошибок: {result['summary']['errors']}; предупреждений: {result['summary']['warnings']}"
         )
+        print("Рекомендуемая структура: ModuleInfo.txt + Native/<Plugin>.XenoPlugin.dll + один INI")
+        print("  Исходники: SOURCE/Native/<Plugin>/ и SOURCE/Native/build.ps1")
+        print("  Не кладите XenoCore.dll, dsound.dll или общий XenoNative.ini в каталог мода")
         for issue in result["issues"]:
             print(f"{issue['severity'].upper()} {issue['code']}: {issue['message']}")
     return 0 if report.valid else 1
@@ -1601,7 +1604,13 @@ def _runtime_lint_target(
                 )
             else:
                 rson_projects.append(project)
-                issues.extend(lint_rson_runtime(project, check_custom_factions=False))
+                issues.extend(
+                    lint_rson_runtime(
+                        project,
+                        check_custom_factions=False,
+                        native_root=mod_root,
+                    )
+                )
             checked_rson.append(str(path))
         except Exception as exc:
             issues.append(RuntimeIssue("error", "runtime-rson-load", str(exc), str(path)))

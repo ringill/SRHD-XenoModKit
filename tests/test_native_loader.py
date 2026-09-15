@@ -13,7 +13,7 @@ from srhd_modkit.native_loader import (
     inspect_native_dll,
     validate_native_mod,
 )
-from srhd_modkit.runtime_lint import lint_imported_functions
+from srhd_modkit.runtime_lint import lint_imported_functions, lint_rson_runtime
 from srhd_modkit.scripts import RSON_FILE_ID, RSON_FILE_VERSION, RsonProject
 from srhd_modkit.project import load_project
 from srhd_modkit.project_ops import initialize_project
@@ -225,6 +225,85 @@ class NativeLoaderTests(unittest.TestCase):
                 {"XenoPlugin_Query", "XenoPlugin_Initialize"},
             )
 
+    def test_legacy_native_loader_script_function_is_candidate_not_unknown_api(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name) / "LegacyGalaxy"
+            _mod(root)
+            native = root / "Native"
+            native.mkdir()
+            (root / "XenoNativePlugin.ini").write_text(
+                "[Plugin]\nEnabled=1\nDll=Native\\galaxy_gen.dll\nLegacy=1\n",
+                encoding="utf-8",
+            )
+            (native / "galaxy_gen.dll").write_bytes(
+                _plugin_dll() + "StarMapGetObjectCluster".encode("utf-16le") + b"\0\0"
+            )
+            project = RsonProject(
+                {
+                    "FileID": RSON_FILE_ID,
+                    "FileVersion": RSON_FILE_VERSION,
+                    "ScriptName": "Mod_LegacyGalaxy",
+                    "Visual.Objects": [
+                        {
+                            "Operations": [
+                                {
+                                    "Type": "Top",
+                                    "Name": "Turn",
+                                    "#": 1,
+                                    "Code.Type": "Turn",
+                                    "Code": ["if(StarMapGetObjectCluster(star) >= 1) exit;"],
+                                }
+                            ]
+                        }
+                    ],
+                    "Visual.Links": [],
+                },
+                root / "SOURCE" / "Mod_LegacyGalaxy.rson",
+            )
+            issues = lint_rson_runtime(project, native_root=root, check_custom_factions=False)
+            codes = {issue.code for issue in issues}
+            self.assertNotIn("runtime-unresolved-user-function", codes)
+            self.assertIn("runtime-native-loader-function-unverified", codes)
+
+    def test_native_script_api_manifest_closes_direct_call_and_checks_arity(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name) / "ManifestGalaxy"
+            _mod(root)
+            native = root / "Native"
+            native.mkdir()
+            (native / "Galaxy.XenoPlugin.dll").write_bytes(_plugin_dll())
+            (native / "Galaxy.XenoScriptApi.json").write_text(
+                '{"schema":"srhd-modkit-native-script-api-v1",'
+                '"dll":"Galaxy.XenoPlugin.dll",'
+                '"functions":[{"name":"StarMapGetObjectCluster","arity":1}]}',
+                encoding="utf-8",
+            )
+            project = RsonProject(
+                {
+                    "FileID": RSON_FILE_ID,
+                    "FileVersion": RSON_FILE_VERSION,
+                    "ScriptName": "Mod_ManifestGalaxy",
+                    "Visual.Objects": [
+                        {
+                            "Operations": [
+                                {
+                                    "Type": "Top",
+                                    "Name": "Turn",
+                                    "#": 1,
+                                    "Code.Type": "Turn",
+                                    "Code": ["StarMapGetObjectCluster();"],
+                                }
+                            ]
+                        }
+                    ],
+                    "Visual.Links": [],
+                },
+                root / "SOURCE" / "Mod_ManifestGalaxy.rson",
+            )
+            issues = lint_rson_runtime(project, native_root=root, check_custom_factions=False)
+            self.assertNotIn("runtime-unresolved-user-function", {issue.code for issue in issues})
+            self.assertIn("runtime-native-loader-function-arity-mismatch", {issue.code for issue in issues})
+
     def test_validate_automatic_plugin_and_integrate_with_audit(self) -> None:
         with tempfile.TemporaryDirectory() as name:
             root = Path(name) / "NativeFixture"
@@ -248,6 +327,8 @@ class NativeLoaderTests(unittest.TestCase):
                 payload["loader"]["source"],
                 "https://github.com/Xenomorphchyma/XenoMods",
             )
+            self.assertEqual(payload["layout"]["recommended"], "single-plugin-config")
+            self.assertIn("Native/<Plugin>.XenoPlugin.dll", payload["layout"]["runtime"])
             self.assertTrue(validate_schema_document(payload)["valid"])
             audit = audit_mod(root, profile="dev")
             check = next(item for item in audit.checks if item.name == "native-loader")
