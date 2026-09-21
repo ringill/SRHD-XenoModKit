@@ -1856,6 +1856,13 @@ class Toolchain:
             + "\n",
             encoding="utf-8",
         )
+        if resolved_lang is not None:
+            # RScript rewrites the dialog DAT it is handed: the numeric keys of the
+            # Script/<ScriptName> block come back under different names. Hand it a
+            # throwaway copy so the caller's Lang.dat is never written.
+            staged_lang = transaction / "Lang.dat"
+            shutil.copy2(resolved_lang, staged_lang)
+            resolved_lang = staged_lang
         recovered = transaction / "recovered.rson"
         phases: list[dict[str, Any]] = [
             {"name": "inspect-source", "status": "passed", "seconds": 0.0}
