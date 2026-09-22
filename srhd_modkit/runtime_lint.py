@@ -3725,13 +3725,12 @@ def _lint_dialog_message_eager_expressions(project: RsonProject) -> list[Runtime
             if not arguments or (number := _constant_int(arguments[0])) is None:
                 continue
             prefix = _mask_non_code(text[:position])
-            immediate = re.search(
-                r"\b([A-Za-z_][A-Za-z0-9_]*)\s*=(?!=)\s*[^;{}]*;\s*$",
-                prefix,
-                re.IGNORECASE,
-            )
+            # The message text is resolved when the dialog is built, so every assignment earlier in
+            # this container has already happened - not only the statement right before the call.
+            # Keeping just the last one made sibling captions look unprepared: a node that prepares
+            # tstr1..tstr6 before a single DChange reported five of them.
             transition_preassignments.setdefault(number, []).append(
-                {immediate.group(1).casefold()} if immediate else set()
+                {match.group(1).casefold() for match in assignment.finditer(prefix)}
             )
 
     # A TDialogAnswer carries AMsg.Num, not DMsg.Num: it is not entered by DChange but shown as a
