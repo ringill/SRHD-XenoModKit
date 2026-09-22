@@ -617,6 +617,26 @@ class ToolchainWorkflowTests(unittest.TestCase):
             self.assertTrue(staged_lang.parent.name.startswith(".srhd-decompile-"))
             self.assertEqual(lang.read_bytes(), b"not-empty")
 
+    def test_lang_staging_copy_failure_cleans_transaction(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            source = root / "source.scr"
+            output = root / "verified.rson"
+            lang = root / "Lang.dat"
+            source.write_bytes((8).to_bytes(4, "little") + b"source")
+            lang.write_bytes(b"not-empty")
+            chain = Toolchain(root / "tools")
+
+            with patch(
+                "srhd_modkit.toolchain.shutil.copy2",
+                side_effect=PermissionError("simulated locked Lang.dat"),
+            ):
+                with self.assertRaises(PermissionError):
+                    chain.decompile_scr(source, output, lang_dat=lang)
+
+            self.assertEqual(list(root.glob(".srhd-decompile-*")), [])
+            self.assertEqual(lang.read_bytes(), b"not-empty")
+
     def test_silent_rscript_main_window_stall_has_complete_failure_report(self) -> None:
         with tempfile.TemporaryDirectory() as name:
             root = Path(name)
