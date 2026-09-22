@@ -3712,36 +3712,12 @@ def _lint_dialog_message_eager_expressions(project: RsonProject) -> list[Runtime
         r"\b([A-Za-z_][A-Za-z0-9_]*)\s*=(?!=)\s*[^;]+",
         re.IGNORECASE,
     )
-    for container in _iter_code_containers(project):
-        if container.object_id not in dialog_objects and container.code_type != "dialogbegin":
-            continue
-        for line in container.lines:
-            dialog_assignments.update(
-                match.group(1).casefold()
-                for match in assignment.finditer(_mask_non_code(line))
-            )
-        text = "\n".join(container.lines)
-        for position, arguments, _end in _iter_parsed_calls(text, "DChange"):
-            if not arguments or (number := _constant_int(arguments[0])) is None:
-                continue
-            prefix = _mask_non_code(text[:position])
-            # The message text is resolved when the dialog is built, so every assignment earlier in
-            # this container has already happened - not only the statement right before the call.
-            # Keeping just the last one made sibling captions look unprepared: a node that prepares
-            # tstr1..tstr6 before a single DChange reported five of them.
-            transition_preassignments.setdefault(number, []).append(
-                {match.group(1).casefold() for match in assignment.finditer(prefix)}
-            )
-
-    # A TDialogAnswer carries AMsg.Num, not DMsg.Num: it is not entered by DChange but shown as a
-    # child of its parent message, so the parent's incoming transitions are the ones that prepare
-    # its caption. The parent is the message whose code adds the answer, i.e. DAdd(<AMsg.Num>).
-    answer_parents: dict[str, set[int]] = {}
     objects_by_id = {
         item["#"]: item for item in project.iter_objects() if isinstance(item.get("#"), int)
     }
-    outgoing: dict[int, set[int]] = {}
     links = project.data.get("Visual.Links", [])
+    outgoing: dict[int, set[int]] = {}
+    incoming: dict[int, set[int]] = {}
     if isinstance(links, list):
         for link in links:
             if not isinstance(link, dict):
@@ -3749,6 +3725,18 @@ def _lint_dialog_message_eager_expressions(project: RsonProject) -> list[Runtime
             begin, end = link.get("Begin"), link.get("End")
             if begin in objects_by_id and end in objects_by_id:
                 outgoing.setdefault(begin, set()).add(end)
+                incoming.setdefault(end, set()).add(begin)
+
+    # A TDialogAnswer carries AMsg.Num, not DMsg.Num: it is not entered by DChange but shown as a
+    # child of its parent message, so the parent's incoming transitions are the ones that prepare
+    # its caption. The parent is the message whose code adds the answer, i.e. DAdd(<AMsg.Num>).
+    answer_numbers = {
+        item["#"]: str(item.get("AMsg.Num", "")).strip()
+        for item in project.iter_objects()
+        if str(item.get("Type", "")).casefold() == "tdialoganswer"
+        and isinstance(item.get("#"), int)
+    }
+    answer_parents: dict[str, set[int]] = {}
     for object_id, item in objects_by_id.items():
         if str(item.get("Type", "")).casefold() != "tdialogmsg":
             continue
@@ -3766,6 +3754,62 @@ def _lint_dialog_message_eager_expressions(project: RsonProject) -> list[Runtime
                     key = arguments[0].strip().strip("\"'")
                     if key:
                         answer_parents.setdefault(key, set()).add(number)
+
+    # A node every link into which comes from an answer is a click handler: it runs when the player
+    # picks that answer of the message showing it, so the captions are the ones prepared when that
+    # message was built - the inherited set, not the node's own assignments.
+    click_answers: dict[int, set[str]] = {}
+    for object_id, sources in incoming.items():
+        if sources and all(source in answer_numbers for source in sources):
+            click_answers[object_id] = {answer_numbers[source] for source in sources}
+
+    containers = list(_iter_code_containers(project))
+    dialog_containers = [
+        container
+        for container in containers
+        if container.object_id in dialog_objects or container.code_type == "dialogbegin"
+    ]
+    for container in dialog_containers:
+        for line in container.lines:
+            dialog_assignments.update(
+                match.group(1).casefold()
+                for match in assignment.finditer(_mask_non_code(line))
+            )
+    for container in dialog_containers:
+        if container.object_id in click_answers:
+            continue
+        text = "\n".join(container.lines)
+        for position, arguments, _end in _iter_parsed_calls(text, "DChange"):
+            if not arguments or (number := _constant_int(arguments[0])) is None:
+                continue
+            prefix = _mask_non_code(text[:position])
+            # The message text is resolved when the dialog is built, so every assignment earlier in
+            # this container has already happened - not only the statement right before the call.
+            # Keeping just the last one made sibling captions look unprepared: a node that prepares
+            # tstr1..tstr6 before a single DChange reported five of them.
+            transition_preassignments.setdefault(number, []).append(
+                {match.group(1).casefold() for match in assignment.finditer(prefix)}
+            )
+    for container in dialog_containers:
+        answer_keys = click_answers.get(container.object_id)
+        if not answer_keys:
+            continue
+        text = "\n".join(container.lines)
+        for position, arguments, _end in _iter_parsed_calls(text, "DChange"):
+            if not arguments or (number := _constant_int(arguments[0])) is None:
+                continue
+            # A click handler may prepare the caption itself as well - then that is the stronger
+            # guarantee, and both sources are acceptable at this transition.
+            prepared_here = {
+                match.group(1).casefold()
+                for match in assignment.finditer(_mask_non_code(text[:position]))
+            }
+            inherited: set[str] = set()
+            for answer_key in answer_keys:
+                for parent in answer_parents.get(answer_key, set()):
+                    for prepared in transition_preassignments.get(parent, []):
+                        inherited |= prepared
+            transition_preassignments.setdefault(number, []).append(prepared_here | inherited)
 
     template_expression = re.compile(r"<([^<>]+)>")
     indexed = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\[\s*([^]]+)\s*\]")

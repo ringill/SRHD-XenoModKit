@@ -3959,6 +3959,71 @@ class RuntimeLintTests(unittest.TestCase):
         }
         self.assertIn("runtime-dialog-msg-eager-mutable-value", unprepared)
 
+    def test_click_handler_inherits_the_parent_message_captions(self) -> None:
+        """A node entered only from an answer runs on a click; the captions are the parent's."""
+
+        data = deepcopy(SAFE_RSON)
+        group = data["Visual.Objects"][0]
+        group["Variables"] = [
+            {"Type": "TVar", "Name": "label", "Init": "''", "Parent": -1, "#": 20}
+        ]
+        group["Dialogs"] = [
+            {"Type": "TDialog", "Name": "Shop", "Parent": -1, "#": 10},
+            {
+                "Type": "TDialogMsg",
+                "Name": "Menu",
+                "Parent": -1,
+                "#": 11,
+                "DMsg.Num": "20",
+                "Msg": "Pick an action",
+            },
+            {
+                "Type": "TDialogMsg",
+                "Name": "Result",
+                "Parent": -1,
+                "#": 14,
+                "DMsg.Num": "21",
+                "Msg": "<label>",
+            },
+            {
+                "Type": "TDialogAnswer",
+                "Name": "",
+                "Parent": -1,
+                "#": 12,
+                "AMsg.Num": "7",
+                "Msg": "Go",
+            },
+        ]
+        group["Operations"].extend(
+            [
+                {
+                    "Type": "Top",
+                    "Name": "PrepareMenu",
+                    "Parent": 10,
+                    "#": 13,
+                    "Code.Type": "Turn",
+                    "Code": ["DAdd(7);", "label = 'Buy';", "DChange(20);"],
+                },
+                {
+                    "Type": "Top",
+                    "Name": "OnClick",
+                    "Parent": 10,
+                    "#": 15,
+                    "Code.Type": "Turn",
+                    "Code": ["DChange(21);"],
+                },
+            ]
+        )
+        data["Visual.Links"] = [
+            {"Type": "TGraphLink", "Begin": 11, "End": 13, "Nom": 0, "Arrow": True},
+            {"Type": "TGraphLink", "Begin": 12, "End": 15, "Nom": 0, "Arrow": True},
+        ]
+        codes = {
+            issue.code
+            for issue in lint_rson_runtime(RsonProject(data, Path("click-inherit.rson")))
+        }
+        self.assertNotIn("runtime-dialog-msg-eager-mutable-value", codes)
+
     def test_linked_dtext_warns_when_dialog_message_already_has_text(self) -> None:
         data = deepcopy(SAFE_RSON)
         group = data["Visual.Objects"][0]
