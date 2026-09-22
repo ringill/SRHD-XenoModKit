@@ -3938,6 +3938,19 @@ class RuntimeLintTests(unittest.TestCase):
         }
         self.assertNotIn("runtime-dialog-msg-eager-mutable-value", prepared)
 
+        # A sibling assignment after it must not hide that the caption was prepared earlier.
+        group["Operations"][-1]["Code"] = [
+            "DAdd(7);",
+            "label = 'Buy';",
+            "other = 1;",
+            "DChange(13);",
+        ]
+        sibling = {
+            issue.code
+            for issue in lint_rson_runtime(RsonProject(data, Path("answer-parent-sibling.rson")))
+        }
+        self.assertNotIn("runtime-dialog-msg-eager-mutable-value", sibling)
+
         # The same answer without the caption prepared before the transition keeps warning.
         group["Operations"][-1]["Code"] = ["DAdd(7);", "DChange(13);", "label = 'Buy';"]
         unprepared = {
