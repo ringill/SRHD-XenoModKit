@@ -141,6 +141,9 @@ def _rscript_failure_diagnostic(
 ) -> dict[str, Any] | None:
     """Extract stable machine-readable facts from legacy modal diagnostics."""
 
+    custom = getattr(exc, "srhd_diagnostic", None)
+    if isinstance(custom, dict):
+        return custom
     message = str(exc)
     folded = message.casefold()
     match = re.search(
@@ -230,6 +233,27 @@ class ExternalProcessExitFailure(RuntimeError):
         self.operation = operation
         self.exit_code = exit_code
         super().__init__(f"{operation} завершился с кодом {exit_code}")
+
+
+class ScriptLanguageKeyRenumbered(RuntimeError):
+    """SCR round-trip changed keys used by imported CFG language overrides."""
+
+    def __init__(self, *, added: list[dict[str, str]], removed: list[dict[str, str]]):
+        self.srhd_diagnostic = {
+            "code": "rscript-dialog-language-key-renumbered",
+            "message": (
+                "После SCR -> RSON -> SCR изменилась нумерация языковых ключей "
+                "при импортированном Lang.dat; существующие CFG/<язык>/Lang.dat "
+                "могут перестать переопределять текст"
+            ),
+            "added": added,
+            "removed": removed,
+            "suggested_retry": (
+                "Сохраните исходные Script.<имя>.<номер> ключи или явно обновите "
+                "все языковые DAT; непроверенный RSON не публикуется"
+            ),
+        }
+        super().__init__(self.srhd_diagnostic["message"])
 
 
 class RsmBuildFailure(ValueError):
@@ -516,6 +540,22 @@ def _project_script_language_keys(project: Any, script_name: str) -> set[str]:
             if match.group(1).casefold() == target:
                 result.add(match.group(2))
     return result
+
+
+def _dialog_language_key_rows(scr_info: dict[str, Any]) -> list[dict[str, str]]:
+    """Return stable, deduplicated ``Script.<name>.<number>`` key rows."""
+
+    rows: dict[tuple[str, int], dict[str, str]] = {}
+    for item in scr_info.get("dialog_language_keys", []):
+        if not isinstance(item, dict):
+            continue
+        script_name = str(item.get("script_name", "")).strip()
+        raw_key = str(item.get("key", "")).strip()
+        if not script_name or not raw_key.isdecimal():
+            continue
+        identity = (script_name.casefold(), int(raw_key))
+        rows.setdefault(identity, {"script_name": script_name, "key": str(int(raw_key))})
+    return [rows[key] for key in sorted(rows, key=lambda value: (value[0], value[1]))]
 
 
 def _blockpar_inline_comment_risk(document: BlockParDocument) -> tuple[str, str] | None:
@@ -1883,10 +1923,25 @@ class Toolchain:
         rebuild_result = None
         rebuilt_sha256 = None
         exact_binary_match = False
+        language_key_stability: dict[str, Any] = {
+            "checked": False,
+            "match": None,
+            "source": [],
+            "roundtrip": [],
+            "added": [],
+            "removed": [],
+        }
         roundtrip_policy: dict[str, Any] | None = None
         decompile_policy: dict[str, Any] | None = None
         dialogs_imported = resolved_lang is not None
         lang_fallback_used = False
+        lang_import_status = (
+            "pending"
+            if requested_lang is not None and lang_dat_skip_reason is None
+            else "skipped"
+            if lang_dat_skip_reason is not None
+            else "not-requested"
+        )
         lang_import_error: dict[str, Any] | None = None
 
         def preserve_unverified() -> str | None:
@@ -1928,9 +1983,7 @@ class Toolchain:
                 "dialogs_imported": dialogs_imported,
                 "lang_dat_skip_reason": lang_dat_skip_reason,
                 "lang_import": {
-                    "status": (
-                        "failed-fallback" if lang_fallback_used else "failed"
-                    ) if requested_lang is not None else "not-requested",
+                    "status": lang_import_status,
                     "fallback_used": lang_fallback_used,
                     "diagnostic": lang_import_error or diagnostic,
                 },
@@ -1949,6 +2002,7 @@ class Toolchain:
                     ),
                 },
                 "runtime_issues": [_decompiled_runtime_issue(issue) for issue in runtime_issues],
+                "language_key_stability": language_key_stability,
                 "timeouts": {
                     "decompile": decompile_policy,
                     "roundtrip": roundtrip_policy,
@@ -1979,6 +2033,13 @@ class Toolchain:
                     lang_dat=resolved_lang,
                     timeout=decompile_timeout,
                 )
+                lang_import_status = (
+                    "skipped"
+                    if lang_dat_skip_reason is not None
+                    else "passed"
+                    if requested_lang is not None
+                    else "not-requested"
+                )
                 phases.append(
                     {
                         "name": "recover-rson",
@@ -1998,6 +2059,7 @@ class Toolchain:
                     }
                 )
                 if resolved_lang is None or not fallback_without_lang:
+                    lang_import_status = "failed" if requested_lang is not None else "not-requested"
                     return failure_result(exc, operational=True)
                 lang_import_error = _rscript_failure_diagnostic(exc) or {
                     "code": "decompile-lang-import-failed",
@@ -2006,6 +2068,7 @@ class Toolchain:
                 }
                 dialogs_imported = False
                 lang_fallback_used = True
+                lang_import_status = "failed-fallback"
                 recovered.unlink(missing_ok=True)
                 fallback_started = time.monotonic()
                 try:
@@ -2026,6 +2089,7 @@ class Toolchain:
                         }
                     )
                 except Exception as fallback_exc:
+                    lang_import_status = "failed" if requested_lang is not None else "not-requested"
                     phases.append(
                         {
                             "name": "recover-rson-without-lang",
@@ -2124,6 +2188,35 @@ class Toolchain:
                     )
                 if source_info["event_signatures"] != rebuilt_info["event_signatures"]:
                     raise RuntimeError("После SCR -> RSON -> SCR изменились сигнатуры событий")
+                source_language_keys = _dialog_language_key_rows(source_info)
+                rebuilt_language_keys = _dialog_language_key_rows(rebuilt_info)
+                source_key_set = {
+                    (row["script_name"].casefold(), int(row["key"]))
+                    for row in source_language_keys
+                }
+                rebuilt_key_set = {
+                    (row["script_name"].casefold(), int(row["key"]))
+                    for row in rebuilt_language_keys
+                }
+                language_key_stability = {
+                    "checked": bool(dialogs_imported),
+                    "match": source_key_set == rebuilt_key_set if dialogs_imported else None,
+                    "source": source_language_keys,
+                    "roundtrip": rebuilt_language_keys,
+                    "added": [
+                        {"script_name": name, "key": str(key)}
+                        for name, key in sorted(rebuilt_key_set - source_key_set)
+                    ],
+                    "removed": [
+                        {"script_name": name, "key": str(key)}
+                        for name, key in sorted(source_key_set - rebuilt_key_set)
+                    ],
+                }
+                if dialogs_imported and source_key_set != rebuilt_key_set:
+                    raise ScriptLanguageKeyRenumbered(
+                        added=language_key_stability["added"],
+                        removed=language_key_stability["removed"],
+                    )
                 rebuilt_sha256 = sha256_file(rebuilt_scr)
                 exact_binary_match = sha256_file(source) == rebuilt_sha256
                 phases.append(
@@ -2243,11 +2336,7 @@ class Toolchain:
             "dialogs_imported": dialogs_imported,
             "lang_dat_skip_reason": lang_dat_skip_reason,
             "lang_import": {
-                "status": (
-                    "failed-fallback"
-                    if lang_fallback_used
-                    else "passed" if dialogs_imported else "skipped" if lang_dat_skip_reason else "not-requested"
-                ),
+                "status": lang_import_status,
                 "fallback_used": lang_fallback_used,
                 "diagnostic": lang_import_error,
             },
@@ -2259,6 +2348,7 @@ class Toolchain:
                 "scr_sha256": rebuilt_sha256,
                 "exact_binary_match": exact_binary_match,
                 "event_signatures_match": True,
+                "language_keys_match": language_key_stability["match"],
                 "compiler_exit_code": rebuild_result.exit_code,
                 "compiler_seconds": round(rebuild_result.elapsed_seconds, 3),
                 "compiler_queue_seconds": round(getattr(rebuild_result, "queue_seconds", 0.0), 3),
@@ -2286,6 +2376,7 @@ class Toolchain:
                 ),
             },
             "runtime_issues": [_decompiled_runtime_issue(issue) for issue in runtime_issues],
+            "language_key_stability": language_key_stability,
         }
 
     def compare_scr(
@@ -2348,6 +2439,7 @@ class Toolchain:
                         "deep_roundtrip",
                         "runtime_analysis",
                         "runtime_issues",
+                        "language_key_stability",
                         "phases",
                         "error",
                         "timeouts",
@@ -2362,6 +2454,7 @@ class Toolchain:
             changed_blocks: list[dict[str, Any]] = []
             metadata_match = False
             event_signatures_match: bool | None = None
+            language_keys_match: bool | None = None
             runtime_changes = {"added": [], "resolved": [], "unchanged": []}
             storage_compatibility: dict[str, Any] | None = None
             dialog_semantics: dict[str, Any] | None = None
@@ -2419,6 +2512,31 @@ class Toolchain:
                 event_signatures_match = (
                     left_scr_info["event_signatures"] == right_scr_info["event_signatures"]
                 )
+                left_language_keys = _dialog_language_key_rows(left_scr_info)
+                right_language_keys = _dialog_language_key_rows(right_scr_info)
+                left_language_key_set = {
+                    (row["script_name"].casefold(), int(row["key"]))
+                    for row in left_language_keys
+                }
+                right_language_key_set = {
+                    (row["script_name"].casefold(), int(row["key"]))
+                    for row in right_language_keys
+                }
+                language_keys_match = left_language_key_set == right_language_key_set
+                if not language_keys_match:
+                    update_issues.append(
+                        {
+                            "severity": "warning",
+                            "code": "rscript-dialog-language-keys-changed",
+                            "message": (
+                                "SCR использует другой набор числовых языковых ключей; "
+                                "CFG/<язык>/Lang.dat может перестать переопределять "
+                                "текст. Проверьте соответствие ключей перед публикацией"
+                            ),
+                            "left": left_language_keys,
+                            "right": right_language_keys,
+                        }
+                    )
                 metadata_match = (
                     left_scr_info["version"] == right_scr_info["version"]
                     and event_signatures_match
@@ -2491,6 +2609,7 @@ class Toolchain:
                 "comparison": {
                     "metadata_match": metadata_match if verified else None,
                     "event_signatures_match": event_signatures_match,
+                    "language_keys_match": language_keys_match,
                     "code_changed": bool(changed_blocks) if verified else None,
                     "changed_blocks": changed_blocks,
                     "runtime_issues": runtime_changes,

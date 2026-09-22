@@ -732,6 +732,57 @@ class ToolchainWorkflowTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "Дублирующийся ключ"):
                 inspect_rscript_lang_fragment(duplicate)
 
+    def test_decompile_rejects_imported_lang_key_renumbering(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            source = root / "source.scr"
+            output = root / "verified.rson"
+            lang = root / "Lang.dat"
+            source.write_bytes(
+                (8).to_bytes(4, "little")
+                + 'DAnswer(CT("Script.Workflow.41"));'.encode("utf-16-le")
+            )
+            lang.write_bytes(b"not-empty")
+            chain = Toolchain(root / "tools")
+
+            process = SimpleNamespace(
+                exit_code=0,
+                forced_after_outputs=False,
+                elapsed_seconds=0.01,
+                queue_seconds=0.0,
+                progress_updates=1,
+                last_progress_seconds=0.01,
+            )
+
+            def fake_recover(_source, recovered, *, lang_dat, **_kwargs):
+                self.assertIsNotNone(lang_dat)
+                recovered.write_text(json.dumps(PROJECT), encoding="utf-8")
+                return process, {"mode": "test"}
+
+            def fake_compile(_source, scr_output, lang_output, **_kwargs):
+                scr_output.write_bytes(
+                    (8).to_bytes(4, "little")
+                    + 'DAnswer(CT("Script.Workflow.0"));'.encode("utf-16-le")
+                )
+                lang_output.write_bytes(b"\xff\xfe")
+                return process, inspect_scr(scr_output), {"mode": "test"}
+
+            with patch.object(chain, "_recover_scr_with_rscript", side_effect=fake_recover), patch.object(
+                chain, "_compile_rson_with_rscript", side_effect=fake_compile
+            ):
+                result = chain.decompile_scr(source, output, lang_dat=lang)
+
+            self.assertFalse(result["verified"])
+            self.assertEqual(result["status"], "unverified")
+            self.assertEqual(
+                result["error"]["diagnostic"]["code"],
+                "rscript-dialog-language-key-renumbered",
+            )
+            self.assertFalse(result["language_key_stability"]["match"])
+            self.assertEqual(result["language_key_stability"]["removed"][0]["key"], "41")
+            self.assertEqual(result["language_key_stability"]["added"][0]["key"], "0")
+            self.assertFalse(output.exists())
+
     def test_script_lang_base_rejects_code_stub_values(self) -> None:
         with tempfile.TemporaryDirectory() as name:
             root = Path(name)
