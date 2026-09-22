@@ -1950,6 +1950,15 @@ class Toolchain:
             }
 
         try:
+            if resolved_lang is not None:
+                # RScript rewrites the dialog DAT it is handed: the numeric keys of
+                # the Script/<ScriptName> block come back under different names. Hand
+                # it a throwaway copy so the caller's Lang.dat is never written.
+                # Keep this inside the transaction try/finally: even a failed copy
+                # must not leave a .srhd-decompile-* directory behind.
+                staged_lang = transaction / "Lang.dat"
+                shutil.copy2(resolved_lang, staged_lang)
+                resolved_lang = staged_lang
             phase_started = time.monotonic()
             _selected_decompile_timeout, decompile_policy = _rscript_timeout_policy(
                 source,
