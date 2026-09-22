@@ -4024,6 +4024,59 @@ class RuntimeLintTests(unittest.TestCase):
         }
         self.assertNotIn("runtime-dialog-msg-eager-mutable-value", codes)
 
+    def test_return_to_the_message_that_injected_the_answers_is_a_refresh(self) -> None:
+        """If a dialog's answers come from message M's code, returning to M only re-displays it."""
+
+        data = deepcopy(SAFE_RSON)
+        group = data["Visual.Objects"][0]
+        group["Variables"] = [
+            {"Type": "TVar", "Name": "label", "Init": "''", "Parent": -1, "#": 20}
+        ]
+        group["Dialogs"] = [
+            {"Type": "TDialog", "Name": "Menu", "Parent": -1, "#": 10},
+            {
+                "Type": "TDialogMsg",
+                "Name": "",
+                "Parent": -1,
+                "#": 11,
+                "DMsg.Num": "20",
+                "Msg": "<label>",
+            },
+        ]
+        group["Operations"].extend(
+            [
+                {
+                    "Type": "Top",
+                    "Name": "ShowMenu",
+                    "Parent": 10,
+                    "#": 13,
+                    "Code.Type": "Turn",
+                    "Code": [
+                        "label = 'Buy';",
+                        "InjectAnswer('Menu', 'item', 1);",
+                        "DChange(20);",
+                    ],
+                },
+                {
+                    "Type": "Top",
+                    "Name": "MenuHandler",
+                    "Parent": 10,
+                    "#": 14,
+                    "Code.Type": "Turn",
+                    "Code": ["DChange(20);"],
+                },
+            ]
+        )
+        data["Visual.Links"] = [
+            {"Type": "TGraphLink", "Begin": 11, "End": 13, "Nom": 0, "Arrow": True},
+            {"Type": "TGraphLink", "Begin": 10, "End": 14, "Nom": 0, "Arrow": True},
+        ]
+        codes = {
+            issue.code
+            for issue in lint_rson_runtime(RsonProject(data, Path("refresh-menu.rson")))
+        }
+        self.assertNotIn("runtime-dialog-msg-eager-mutable-value", codes)
+
     def test_linked_dtext_warns_when_dialog_message_already_has_text(self) -> None:
         data = deepcopy(SAFE_RSON)
         group = data["Visual.Objects"][0]
