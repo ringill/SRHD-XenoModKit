@@ -3763,6 +3763,39 @@ def _lint_dialog_message_eager_expressions(project: RsonProject) -> list[Runtime
         if sources and all(source in answer_numbers for source in sources):
             click_answers[object_id] = {answer_numbers[source] for source in sources}
 
+    # A dialog's answers can be injected by the code of a message (InjectAnswer('<Dialog>', ...)).
+    # That message is on screen while such an answer is clicked, so a handler of that dialog which
+    # returns to it only re-displays the message whose text is already shown.
+    injected_answer_source: dict[str, int] = {}
+    for object_id, item in objects_by_id.items():
+        if str(item.get("Type", "")).casefold() != "tdialogmsg":
+            continue
+        number = _constant_int(str(item.get("DMsg.Num", "")))
+        if number is None:
+            continue
+        for target in outgoing.get(object_id, set()) | {object_id}:
+            code = objects_by_id.get(target, {}).get("Code")
+            if not isinstance(code, list):
+                continue
+            for line in code:
+                for _position, arguments, _end in _iter_parsed_calls(str(line), "InjectAnswer"):
+                    if not arguments:
+                        continue
+                    dialog_name = arguments[0].strip().strip("\"'")
+                    if dialog_name:
+                        injected_answer_source.setdefault(dialog_name, number)
+
+    refresh_pairs: set[tuple[int, int]] = set()
+    for object_id, item in objects_by_id.items():
+        if str(item.get("Type", "")).casefold() != "tdialog":
+            continue
+        dialog_name = str(item.get("Name", "")).strip()
+        source = injected_answer_source.get(dialog_name)
+        if source is None:
+            continue
+        for target in outgoing.get(object_id, set()):
+            refresh_pairs.add((target, source))
+
     containers = list(_iter_code_containers(project))
     dialog_containers = [
         container
@@ -3781,6 +3814,8 @@ def _lint_dialog_message_eager_expressions(project: RsonProject) -> list[Runtime
         text = "\n".join(container.lines)
         for position, arguments, _end in _iter_parsed_calls(text, "DChange"):
             if not arguments or (number := _constant_int(arguments[0])) is None:
+                continue
+            if (container.object_id, number) in refresh_pairs:
                 continue
             prefix = _mask_non_code(text[:position])
             # The message text is resolved when the dialog is built, so every assignment earlier in
@@ -3804,11 +3839,19 @@ def _lint_dialog_message_eager_expressions(project: RsonProject) -> list[Runtime
                 match.group(1).casefold()
                 for match in assignment.finditer(_mask_non_code(text[:position]))
             }
+            parents_of_clicked = {
+                parent
+                for answer_key in answer_keys
+                for parent in answer_parents.get(answer_key, set())
+            }
+            if number in parents_of_clicked:
+                # The handler opens the message that is already on screen - a return/refresh, not a
+                # new message. Its caption is the one being displayed, so nothing has to be prepared.
+                continue
             inherited: set[str] = set()
-            for answer_key in answer_keys:
-                for parent in answer_parents.get(answer_key, set()):
-                    for prepared in transition_preassignments.get(parent, []):
-                        inherited |= prepared
+            for parent in parents_of_clicked:
+                for prepared in transition_preassignments.get(parent, []):
+                    inherited |= prepared
             transition_preassignments.setdefault(number, []).append(prepared_here | inherited)
 
     template_expression = re.compile(r"<([^<>]+)>")
