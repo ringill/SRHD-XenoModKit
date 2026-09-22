@@ -2555,6 +2555,8 @@ def cmd_script_decompile(args: argparse.Namespace) -> int:
         print(f"Объектов: {result['objects']}")
         print("Проверочный цикл SCR -> RSON -> SCR: пройден")
         print(f"SHA-256 RSON: {result['destination_sha256']}")
+        for warning in result.get("language_warnings", []):
+            print(f"WARNING {warning['code']}: {warning['message']}")
         if result.get("lang_import", {}).get("fallback_used"):
             print("Lang.dat не импортирован: выполнен явно разрешённый fallback без диалогов")
     else:

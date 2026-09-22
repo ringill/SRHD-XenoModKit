@@ -235,27 +235,6 @@ class ExternalProcessExitFailure(RuntimeError):
         super().__init__(f"{operation} завершился с кодом {exit_code}")
 
 
-class ScriptLanguageKeyRenumbered(RuntimeError):
-    """SCR round-trip changed keys used by imported CFG language overrides."""
-
-    def __init__(self, *, added: list[dict[str, str]], removed: list[dict[str, str]]):
-        self.srhd_diagnostic = {
-            "code": "rscript-dialog-language-key-renumbered",
-            "message": (
-                "После SCR -> RSON -> SCR изменилась нумерация языковых ключей "
-                "при импортированном Lang.dat; существующие CFG/<язык>/Lang.dat "
-                "могут перестать переопределять текст"
-            ),
-            "added": added,
-            "removed": removed,
-            "suggested_retry": (
-                "Сохраните исходные Script.<имя>.<номер> ключи или явно обновите "
-                "все языковые DAT; непроверенный RSON не публикуется"
-            ),
-        }
-        super().__init__(self.srhd_diagnostic["message"])
-
-
 class RsmBuildFailure(ValueError):
     """Machine-readable failure from the standalone rsmc workflow."""
 
@@ -1931,6 +1910,7 @@ class Toolchain:
             "added": [],
             "removed": [],
         }
+        language_warnings: list[dict[str, Any]] = []
         roundtrip_policy: dict[str, Any] | None = None
         decompile_policy: dict[str, Any] | None = None
         dialogs_imported = resolved_lang is not None
@@ -2003,6 +1983,7 @@ class Toolchain:
                 },
                 "runtime_issues": [_decompiled_runtime_issue(issue) for issue in runtime_issues],
                 "language_key_stability": language_key_stability,
+                "language_warnings": language_warnings,
                 "timeouts": {
                     "decompile": decompile_policy,
                     "roundtrip": roundtrip_policy,
@@ -2213,10 +2194,23 @@ class Toolchain:
                     ],
                 }
                 if dialogs_imported and source_key_set != rebuilt_key_set:
-                    raise ScriptLanguageKeyRenumbered(
-                        added=language_key_stability["added"],
-                        removed=language_key_stability["removed"],
-                    )
+                    # Renumbering is valid compiler output, not a corrupt RSON.
+                    # Only reusing stale language overlays creates a mismatch.
+                    language_warnings.append({
+                        "severity": "warning",
+                        "code": "rscript-dialog-language-key-renumbered",
+                        "message": (
+                            "RScript перенумеровал ключи при контрольной пересборке. "
+                            "Это допустимо, но прежние CFG/<язык>/Lang.dat нельзя "
+                            "считать совместимыми с новым SCR без проверки. "
+                            "При выпуске соберите и опубликуйте согласованные SCR и "
+                            "Lang.dat для всех языков; проверьте внешние ссылки и "
+                            "переводы. Исходный Lang.dat не изменён. Проверка "
+                            "round-trip не доказывает совместимость локализаций"
+                        ),
+                        "added": language_key_stability["added"],
+                        "removed": language_key_stability["removed"],
+                    })
                 rebuilt_sha256 = sha256_file(rebuilt_scr)
                 exact_binary_match = sha256_file(source) == rebuilt_sha256
                 phases.append(
@@ -2377,6 +2371,7 @@ class Toolchain:
             },
             "runtime_issues": [_decompiled_runtime_issue(issue) for issue in runtime_issues],
             "language_key_stability": language_key_stability,
+            "language_warnings": language_warnings,
         }
 
     def compare_scr(
@@ -2440,6 +2435,7 @@ class Toolchain:
                         "runtime_analysis",
                         "runtime_issues",
                         "language_key_stability",
+                        "language_warnings",
                         "phases",
                         "error",
                         "timeouts",

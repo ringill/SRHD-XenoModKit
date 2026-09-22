@@ -732,7 +732,7 @@ class ToolchainWorkflowTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "Дублирующийся ключ"):
                 inspect_rscript_lang_fragment(duplicate)
 
-    def test_decompile_rejects_imported_lang_key_renumbering(self) -> None:
+    def test_decompile_warns_but_publishes_imported_lang_key_renumbering(self) -> None:
         with tempfile.TemporaryDirectory() as name:
             root = Path(name)
             source = root / "source.scr"
@@ -772,16 +772,20 @@ class ToolchainWorkflowTests(unittest.TestCase):
             ):
                 result = chain.decompile_scr(source, output, lang_dat=lang)
 
-            self.assertFalse(result["verified"])
-            self.assertEqual(result["status"], "unverified")
+            self.assertTrue(result["verified"])
+            self.assertEqual(result["status"], "verified")
             self.assertEqual(
-                result["error"]["diagnostic"]["code"],
+                result["language_warnings"][0]["code"],
                 "rscript-dialog-language-key-renumbered",
             )
+            self.assertEqual(result["language_warnings"][0]["severity"], "warning")
             self.assertFalse(result["language_key_stability"]["match"])
             self.assertEqual(result["language_key_stability"]["removed"][0]["key"], "41")
             self.assertEqual(result["language_key_stability"]["added"][0]["key"], "0")
-            self.assertFalse(output.exists())
+            self.assertTrue(output.exists())
+            self.assertEqual(load_rson(output).data, PROJECT)
+            self.assertEqual(lang.read_bytes(), b"not-empty")
+            self.assertFalse(result["roundtrip"]["language_keys_match"])
 
     def test_script_lang_base_rejects_code_stub_values(self) -> None:
         with tempfile.TemporaryDirectory() as name:
