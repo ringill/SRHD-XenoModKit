@@ -3734,6 +3734,40 @@ def _lint_dialog_message_eager_expressions(project: RsonProject) -> list[Runtime
                 {immediate.group(1).casefold()} if immediate else set()
             )
 
+    # A TDialogAnswer carries AMsg.Num, not DMsg.Num: it is not entered by DChange but shown as a
+    # child of its parent message, so the parent's incoming transitions are the ones that prepare
+    # its caption. The parent is the message whose code adds the answer, i.e. DAdd(<AMsg.Num>).
+    answer_parents: dict[str, set[int]] = {}
+    objects_by_id = {
+        item["#"]: item for item in project.iter_objects() if isinstance(item.get("#"), int)
+    }
+    outgoing: dict[int, set[int]] = {}
+    links = project.data.get("Visual.Links", [])
+    if isinstance(links, list):
+        for link in links:
+            if not isinstance(link, dict):
+                continue
+            begin, end = link.get("Begin"), link.get("End")
+            if begin in objects_by_id and end in objects_by_id:
+                outgoing.setdefault(begin, set()).add(end)
+    for object_id, item in objects_by_id.items():
+        if str(item.get("Type", "")).casefold() != "tdialogmsg":
+            continue
+        number = _constant_int(str(item.get("DMsg.Num", "")))
+        if number is None:
+            continue
+        for target in outgoing.get(object_id, set()) | {object_id}:
+            code = objects_by_id.get(target, {}).get("Code")
+            if not isinstance(code, list):
+                continue
+            for line in code:
+                for _position, arguments, _end in _iter_parsed_calls(str(line), "DAdd"):
+                    if not arguments:
+                        continue
+                    key = arguments[0].strip().strip("\"'")
+                    if key:
+                        answer_parents.setdefault(key, set()).add(number)
+
     template_expression = re.compile(r"<([^<>]+)>")
     indexed = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\[\s*([^]]+)\s*\]")
     issues: list[RuntimeIssue] = []
@@ -3790,7 +3824,21 @@ def _lint_dialog_message_eager_expressions(project: RsonProject) -> list[Runtime
             ):
                 continue
             message_number = _constant_int(str(item.get("DMsg.Num", "")))
-            transitions = transition_preassignments.get(message_number, [])
+            if message_number is None:
+                if str(item.get("Type", "")).casefold() != "tdialoganswer":
+                    continue
+                parents = answer_parents.get(str(item.get("AMsg.Num", "")).strip(), set())
+                if not parents:
+                    # Without a proven parent the rule is unsatisfiable: an answer is never entered
+                    # by DChange, so its own number has no transitions at all.
+                    continue
+                transitions = [
+                    names
+                    for number in sorted(parents)
+                    for names in transition_preassignments.get(number, [])
+                ]
+            else:
+                transitions = transition_preassignments.get(message_number, [])
             if transitions and all(simple in names for names in transitions):
                 continue
             key = (object_id, "scalar", simple)

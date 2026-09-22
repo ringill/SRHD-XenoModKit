@@ -3892,6 +3892,60 @@ class RuntimeLintTests(unittest.TestCase):
         self.assertNotIn("runtime-dialog-msg-eager-array-index", safe_codes)
         self.assertNotIn("runtime-dialog-msg-eager-mutable-value", safe_codes)
 
+    def test_answer_caption_is_checked_against_its_parent_message(self) -> None:
+        """An answer carries AMsg.Num; its caption is resolved with the parent message's build."""
+
+        data = deepcopy(SAFE_RSON)
+        group = data["Visual.Objects"][0]
+        group["Variables"] = [
+            {"Type": "TVar", "Name": "label", "Init": "''", "Parent": -1, "#": 20}
+        ]
+        group["Dialogs"] = [
+            {"Type": "TDialog", "Name": "Shop", "Parent": -1, "#": 10},
+            {
+                "Type": "TDialogMsg",
+                "Name": "Confirm",
+                "Parent": -1,
+                "#": 11,
+                "DMsg.Num": "13",
+                "Msg": "Confirm purchase",
+            },
+            {
+                "Type": "TDialogAnswer",
+                "Name": "",
+                "Parent": -1,
+                "#": 12,
+                "AMsg.Num": "7",
+                "Msg": "<label>",
+            },
+        ]
+        group["Operations"].append(
+            {
+                "Type": "Top",
+                "Name": "PrepareConfirm",
+                "Parent": 10,
+                "#": 13,
+                "Code.Type": "Turn",
+                "Code": ["DAdd(7);", "label = 'Buy';", "DChange(13);"],
+            }
+        )
+        data["Visual.Links"] = [
+            {"Type": "TGraphLink", "Begin": 11, "End": 13, "Nom": 0, "Arrow": True}
+        ]
+        prepared = {
+            issue.code
+            for issue in lint_rson_runtime(RsonProject(data, Path("answer-parent.rson")))
+        }
+        self.assertNotIn("runtime-dialog-msg-eager-mutable-value", prepared)
+
+        # The same answer without the caption prepared before the transition keeps warning.
+        group["Operations"][-1]["Code"] = ["DAdd(7);", "DChange(13);", "label = 'Buy';"]
+        unprepared = {
+            issue.code
+            for issue in lint_rson_runtime(RsonProject(data, Path("answer-parent-late.rson")))
+        }
+        self.assertIn("runtime-dialog-msg-eager-mutable-value", unprepared)
+
     def test_linked_dtext_warns_when_dialog_message_already_has_text(self) -> None:
         data = deepcopy(SAFE_RSON)
         group = data["Visual.Objects"][0]
