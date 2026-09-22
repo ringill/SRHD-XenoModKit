@@ -605,7 +605,37 @@ class ToolchainWorkflowTests(unittest.TestCase):
             self.assertFalse(result["dialogs_imported"])
             self.assertTrue(result["lang_import"]["fallback_used"])
             self.assertEqual(result["lang_import"]["status"], "failed-fallback")
-            self.assertEqual(recover_calls, [lang.resolve(), None])
+
+            # RScript rewrites the dialog DAT it is handed, so decompile_scr must pass
+            # it a throwaway copy and never the caller's Lang.dat (issue #1).
+            self.assertEqual(len(recover_calls), 2)
+            staged_lang, fallback_attempt = recover_calls
+            self.assertIsNone(fallback_attempt)
+            self.assertIsNotNone(staged_lang)
+            self.assertNotEqual(staged_lang, lang.resolve())
+            self.assertEqual(staged_lang.name, "Lang.dat")
+            self.assertTrue(staged_lang.parent.name.startswith(".srhd-decompile-"))
+            self.assertEqual(lang.read_bytes(), b"not-empty")
+
+    def test_lang_staging_copy_failure_cleans_transaction(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            source = root / "source.scr"
+            output = root / "verified.rson"
+            lang = root / "Lang.dat"
+            source.write_bytes((8).to_bytes(4, "little") + b"source")
+            lang.write_bytes(b"not-empty")
+            chain = Toolchain(root / "tools")
+
+            with patch(
+                "srhd_modkit.toolchain.shutil.copy2",
+                side_effect=PermissionError("simulated locked Lang.dat"),
+            ):
+                with self.assertRaises(PermissionError):
+                    chain.decompile_scr(source, output, lang_dat=lang)
+
+            self.assertEqual(list(root.glob(".srhd-decompile-*")), [])
+            self.assertEqual(lang.read_bytes(), b"not-empty")
 
     def test_silent_rscript_main_window_stall_has_complete_failure_report(self) -> None:
         with tempfile.TemporaryDirectory() as name:
