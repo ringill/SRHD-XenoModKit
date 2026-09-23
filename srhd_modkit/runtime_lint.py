@@ -3694,6 +3694,75 @@ def _dialog_code_object_ids(project: RsonProject) -> set[int]:
     return result
 
 
+_DIALOG_CONTROL_HEADER_RE = re.compile(
+    r"^\s*(?:if|for|while|switch|else|do)\b|^\s*}\s*else\b",
+    re.IGNORECASE,
+)
+
+
+def _dialog_control_ranges(lines: tuple[str, ...]) -> tuple[tuple[int, int], ...]:
+    """Return conservative source ranges for control statements in a dialog handler.
+
+    The eager-message rule must not treat an assignment in a conditional branch as a
+    must-assignment for a later transition outside that branch.  This intentionally uses
+    the existing statement-body parser and remains conservative for syntax it cannot
+    classify; a false positive is preferable to hiding a real uninitialised caption.
+    """
+
+    ranges: list[tuple[int, int]] = []
+    for index, line in enumerate(lines):
+        if not _DIALOG_CONTROL_HEADER_RE.search(_mask_non_code(line)):
+            continue
+        body = _statement_body_range(lines, index)
+        ranges.append((index, body[1] if body is not None else index))
+    return tuple(ranges)
+
+
+def _dialog_control_path(
+    ranges: tuple[tuple[int, int], ...], line_index: int,
+) -> frozenset[int]:
+    """Identify enclosing control headers for one source line."""
+
+    return frozenset(
+        header
+        for header, end in ranges
+        if header <= line_index <= end
+    )
+
+
+def _dialog_must_assignments_before(
+    lines: tuple[str, ...],
+    text: str,
+    position: int,
+    assignment: re.Pattern[str],
+) -> set[str]:
+    """Collect assignments that dominate a transition on all syntactic paths.
+
+    Assignments in a branch only prove a caption for transitions in that same branch (or a
+    nested branch).  A branch assignment is deliberately not propagated to a transition
+    after the branch, because RScript can execute the other path.  This is a lightweight
+    must-analysis, not a claim to emulate the whole language control flow.
+    """
+
+    line_index = text.count("\n", 0, position)
+    line_start = text.rfind("\n", 0, position) + 1
+    before_on_line = position - line_start
+    ranges = _dialog_control_ranges(lines)
+    transition_path = _dialog_control_path(ranges, line_index)
+    result: set[str] = set()
+    for index, line in enumerate(lines):
+        if index > line_index:
+            break
+        source = _mask_non_code(line)
+        if index == line_index:
+            source = source[:before_on_line]
+        for match in assignment.finditer(source):
+            assignment_path = _dialog_control_path(ranges, index)
+            if assignment_path.issubset(transition_path):
+                result.add(match.group(1).casefold())
+    return result
+
+
 def _lint_dialog_message_eager_expressions(project: RsonProject) -> list[RuntimeIssue]:
     """Check expressions evaluated from Msg before dialog action handlers."""
 
@@ -3817,13 +3886,12 @@ def _lint_dialog_message_eager_expressions(project: RsonProject) -> list[Runtime
                 continue
             if (container.object_id, number) in refresh_pairs:
                 continue
-            prefix = _mask_non_code(text[:position])
             # The message text is resolved when the dialog is built, so every assignment earlier in
             # this container has already happened - not only the statement right before the call.
-            # Keeping just the last one made sibling captions look unprepared: a node that prepares
-            # tstr1..tstr6 before a single DChange reported five of them.
+            # A must-analysis is used here so a conditional assignment is not mistaken for a
+            # guarantee on a path that skips the branch.
             transition_preassignments.setdefault(number, []).append(
-                {match.group(1).casefold() for match in assignment.finditer(prefix)}
+                _dialog_must_assignments_before(container.lines, text, position, assignment)
             )
     for container in dialog_containers:
         answer_keys = click_answers.get(container.object_id)
@@ -3835,10 +3903,9 @@ def _lint_dialog_message_eager_expressions(project: RsonProject) -> list[Runtime
                 continue
             # A click handler may prepare the caption itself as well - then that is the stronger
             # guarantee, and both sources are acceptable at this transition.
-            prepared_here = {
-                match.group(1).casefold()
-                for match in assignment.finditer(_mask_non_code(text[:position]))
-            }
+            prepared_here = _dialog_must_assignments_before(
+                container.lines, text, position, assignment
+            )
             parents_of_clicked = {
                 parent
                 for answer_key in answer_keys

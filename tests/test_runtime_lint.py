@@ -3959,6 +3959,38 @@ class RuntimeLintTests(unittest.TestCase):
         }
         self.assertIn("runtime-dialog-msg-eager-mutable-value", unprepared)
 
+        # An assignment which is only taken on one path must not be treated as a guarantee
+        # for a transition after that branch.  The previous PR implementation collected every
+        # lexical assignment before DChange and would incorrectly suppress this warning.
+        group["Operations"][-1]["Code"] = [
+            "DAdd(7);",
+            "if (panel_initialized)",
+            "{",
+            "    label = 'Buy';",
+            "}",
+            "DChange(13);",
+        ]
+        conditional = {
+            issue.code
+            for issue in lint_rson_runtime(RsonProject(data, Path("answer-parent-conditional.rson")))
+        }
+        self.assertIn("runtime-dialog-msg-eager-mutable-value", conditional)
+
+        # The same assignment is safe when the transition itself is inside that branch.
+        group["Operations"][-1]["Code"] = [
+            "DAdd(7);",
+            "if (panel_initialized)",
+            "{",
+            "    label = 'Buy';",
+            "    DChange(13);",
+            "}",
+        ]
+        same_branch = {
+            issue.code
+            for issue in lint_rson_runtime(RsonProject(data, Path("answer-parent-same-branch.rson")))
+        }
+        self.assertNotIn("runtime-dialog-msg-eager-mutable-value", same_branch)
+
     def test_click_handler_inherits_the_parent_message_captions(self) -> None:
         """A node entered only from an answer runs on a click; the captions are the parent's."""
 
