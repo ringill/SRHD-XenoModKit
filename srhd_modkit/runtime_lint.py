@@ -4277,11 +4277,34 @@ def _persistent_item_parameter_sinks(
     return result
 
 
+def _outermost_call_name(expression: str) -> str | None:
+    """Name of the call the expression evaluates to, if it is a call at all.
+
+    Only the outer call decides what the value *is*: ``ItemCost(IdToItem(...))``
+    evaluates to a number, so the nested ``IdToItem`` says nothing about what the
+    assignment stores.
+    """
+    text = _mask_non_code(expression).casefold()
+    depth = 0
+    for index, char in enumerate(text):
+        if char == "(":
+            if depth == 0:
+                start = index
+                while start > 0 and (text[start - 1].isalnum() or text[start - 1] in "_."):
+                    start -= 1
+                return text[start:index] or None
+            depth += 1
+        elif char == ")":
+            depth = max(0, depth - 1)
+    return None
+
+
 def _raw_item_expression(expression: str, tainted: set[str]) -> bool:
     folded = _mask_non_code(expression).casefold()
-    if re.search(r"\bid\s*\(", folded):
+    outer = _outermost_call_name(expression)
+    if outer == "id":
         return False
-    if re.search(r"\b(?:createquestitem|idtoitem)\s*\(", folded):
+    if outer in {"createquestitem", "idtoitem"}:
         return True
     return any(re.search(rf"\b{re.escape(value)}\b", folded) for value in tainted)
 
@@ -8442,6 +8465,20 @@ def _constant_int(expression: str) -> int | None:
     return int(value) if re.fullmatch(r"[+-]?\d+", value) else None
 
 
+def _answer_is_blocked(answer: str, blocked: set[str]) -> bool:
+    """True when an ``AddDialogBlock`` entry hides this injected answer.
+
+    ``TfRuinsTalk.AddChoice`` looks the answer text up in ``ScriptDialogBlocks``
+    (a substring match, the same as ``FindTextOffsetW``) and drops the choice
+    entirely when the entry's mode is >= 2.  The dialog named by ``AddDialogInject``
+    is only called when that answer is picked, so a hidden answer never reaches it.
+    """
+    candidates = {answer.casefold()}
+    if "~" in answer:
+        candidates.add(answer.split("~", 1)[1].casefold())
+    return any(block in candidate for block in blocked for candidate in candidates)
+
+
 def _dialog_graph_contexts(
     project: RsonProject,
 ) -> tuple[dict[int, set[str]], dict[int, set[int]], dict[str, dict[str, Any]]]:
@@ -8507,6 +8544,18 @@ def _lint_dialog_semantics(project: RsonProject) -> list[RuntimeIssue]:
     issues: list[RuntimeIssue] = []
     station_injected: set[str] = set()
 
+    # Answers hidden by AddDialogBlock (mode >= 2) are dropped by TfRuinsTalk.AddChoice
+    # before they can be picked, so the jump target of such an injection is never called.
+    blocked_answers: set[str] = set()
+    for container in _iter_code_containers(project):
+        text = "\n".join(container.lines)
+        for _position, block_arguments, _end in _iter_parsed_calls(text, "AddDialogBlock"):
+            if not block_arguments or (blocker := _literal_string(block_arguments[0])) is None:
+                continue
+            mode = _constant_int(block_arguments[1]) if len(block_arguments) > 1 else None
+            if blocker and (mode is None or mode >= 2):
+                blocked_answers.add(blocker.casefold())
+
     for container in _iter_code_containers(project):
         text = "\n".join(container.lines)
         context_id = container.object_id if container.object_id is not None else -1
@@ -8529,7 +8578,7 @@ def _lint_dialog_semantics(project: RsonProject) -> list[RuntimeIssue]:
                     )
                 )
 
-        for call in ("AddDialogInject", "InjectAnswer"):
+        for call, answer_index in (("AddDialogInject", 2), ("InjectAnswer", 1)):
             for position, arguments, _end in _iter_parsed_calls(text, call):
                 if not arguments or (target := _literal_string(arguments[0])) is None:
                     continue
@@ -8538,6 +8587,17 @@ def _lint_dialog_semantics(project: RsonProject) -> list[RuntimeIssue]:
                 if not folded_target:
                     # Empty target is the documented callback/attached-code
                     # form of InjectAnswer, not a missing named TDialog.
+                    continue
+                if ":" in target:
+                    # The `Script:Dialog` form is resolved through FindScriptTemplateIndex
+                    # to another script's template, which this project cannot see.
+                    continue
+                answer = (
+                    _literal_string(arguments[answer_index])
+                    if len(arguments) > answer_index
+                    else None
+                )
+                if answer and _answer_is_blocked(answer, blocked_answers):
                     continue
                 if folded_target not in dialogs:
                     issues.append(
